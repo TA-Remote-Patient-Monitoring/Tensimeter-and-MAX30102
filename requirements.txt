@@ -1,0 +1,15 @@
+bleak==0.22.3
+fastapi==0.115.12
+matplotlib==3.10.1
+numpy==2.2.5
+pydantic==2.11.4
+python-dotenv==1.0.1
+terminaltables==3.1.10
+
+# Tambahan untuk database & aut
+uvicorn==0.34.2
+sqlalchemy==2.0.40
+passlib[bcrypt]==1.7.4
+bcrypt<5
+python-jose[cryptography]==3.3.0
+python-multipart==0.0.20
