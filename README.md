@@ -18,13 +18,13 @@ python ./omblepy.py -p -d hem-7155t
 Jalankan backend dengan IPv4 lokal dan mode debug:
 
 ```powershell
-(Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned) ; (& d:\Multiuser\flowbeat\flowbeat-be-python\venv\Scripts\Activate.ps1) ; python -m uvicorn main:app --reload --host [Alamat IPv4] --port 8000
+python -m uvicorn main:app --reload --host [Alamat IPv4] --port 8000
 ```
 
 Contoh:
 
 ```powershell
-(Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned) ; (& d:\Multiuser\flowbeat\flowbeat-be-python\venv\Scripts\Activate.ps1) ; python -m uvicorn main:app --reload --host 192.168.1.5 --port 8000
+python -m uvicorn main:app --reload --host 192.168.1.5 --port 8000
 ```
 
 ### Endpoint yang Bisa Dicoba
