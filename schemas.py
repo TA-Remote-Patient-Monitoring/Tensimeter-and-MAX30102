@@ -67,3 +67,30 @@ class MeasurementOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+from typing import Optional
+from datetime import datetime as dt
+from pydantic import BaseModel, Field
+
+# ─── SPO2 MEASUREMENT ────────────────────────────────────
+
+class Spo2MeasurementIn(BaseModel):
+    id_user    : int
+    id_profile : int
+    spo2       : float
+    bpm        : float
+    temperature: float
+    datetime   : Optional[dt] = Field(default_factory=dt.utcnow)
+
+class Spo2MeasurementOut(BaseModel):
+    id         : int
+    id_user    : int
+    id_profile : int
+    spo2       : float
+    bpm        : float
+    temperature: float
+    blood_sugar: Optional[float] = None
+    datetime   : dt
+
+    class Config:
+        from_attributes = True

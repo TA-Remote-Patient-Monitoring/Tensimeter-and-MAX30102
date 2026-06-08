@@ -14,6 +14,7 @@ class User(Base):
 
     profiles     = relationship("Profile", back_populates="user")
     measurements = relationship("Measurement", back_populates="user")
+    spo2_measurements = relationship("Spo2Measurement", back_populates="user")
 
 
 class Profile(Base):
@@ -30,6 +31,7 @@ class Profile(Base):
 
     user         = relationship("User", back_populates="profiles")
     measurements = relationship("Measurement", back_populates="profile")
+    spo2_measurements = relationship("Spo2Measurement", back_populates="profile")
 
 
 class Measurement(Base):
@@ -47,3 +49,19 @@ class Measurement(Base):
 
     user    = relationship("User", back_populates="measurements")
     profile = relationship("Profile", back_populates="measurements")
+
+
+class Spo2Measurement(Base):
+    __tablename__ = "spo2_measurements"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    id_user    = Column(Integer, ForeignKey("users.id"), nullable=False)
+    id_profile = Column(Integer, ForeignKey("profiles.id"), nullable=False)
+    spo2       = Column(Float, nullable=False)
+    bpm        = Column(Float, nullable=False)
+    temperature= Column(Float, nullable=False)
+    blood_sugar= Column(Float, nullable=True)
+    datetime   = Column(DateTime, default=datetime.datetime.utcnow)
+
+    user    = relationship("User", back_populates="spo2_measurements")
+    profile = relationship("Profile", back_populates="spo2_measurements")
