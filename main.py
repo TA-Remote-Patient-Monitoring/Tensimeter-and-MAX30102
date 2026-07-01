@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -55,19 +56,24 @@ def ensure_sqlite_columns() -> None:
 ensure_sqlite_columns()
 # ───────────────────────────────────────────────────────────
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING").upper()
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=getattr(logging, LOG_LEVEL, logging.WARNING),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
 json_path      = os.path.join('ubpm.json')
 logger         = logging.getLogger("omblepy")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.WARNING))
 bleClient      = None
 deviceSpecific = None
 ble_client     = None
 
 app = FastAPI()
+
+# ── GZip Compression ───────────────────────────────────────
+# Kompresi response JSON besar (measurement lists) — mengurangi payload 60-80%
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)

@@ -11,7 +11,8 @@ class RegisterIn(BaseModel):
     password : str
 
 class LoginIn(BaseModel):
-    email    : str
+    email    : Optional[str] = None
+    phone    : Optional[str] = None
     password : str
 
 class LoginOut(BaseModel):
