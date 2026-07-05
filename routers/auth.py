@@ -1,3 +1,4 @@
+import fastapi
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
@@ -119,6 +120,53 @@ def get_current_user(
         user_by_id_cache[user_id_int] = cached
 
     return cached
+
+
+# ── Service Token Auth (server-to-server) ──────────────────────
+SERVICE_KEY = os.getenv("SERVICE_KEY")
+
+
+class ServiceUser:
+    """
+    Representasi khusus untuk service call (dashboard dokter).
+    is_service=True → downstream skip ownership check.
+    """
+    __slots__ = ("id", "name", "email", "phone", "is_service")
+
+    def __init__(self):
+        self.id = None
+        self.name = "ServiceAccount"
+        self.email = None
+        self.phone = None
+        self.is_service = True
+
+
+# OAuth2 scheme yang tidak auto-error jika tidak ada Bearer token
+_oauth2_optional = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
+
+
+def get_current_user_or_service(
+    token: str | None = Depends(_oauth2_optional),
+    db: Session = Depends(get_db),
+    x_service_key: str | None = fastapi.Header(None, alias="X-Service-Key"),
+):
+    """
+    Dependency yang mendukung 2 mode autentikasi:
+      1. X-Service-Key header → return ServiceUser (untuk dashboard dokter)
+      2. Bearer JWT token     → return CachedUser  (untuk mobile app)
+    """
+    # Mode 1: Service key dari dashboard
+    if x_service_key and SERVICE_KEY and x_service_key == SERVICE_KEY:
+        return ServiceUser()
+
+    # Mode 2: JWT token biasa (mobile app)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token tidak valid atau sudah kedaluwarsa.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return get_current_user(token=token, db=db)
 
 
 @router.post("/register")

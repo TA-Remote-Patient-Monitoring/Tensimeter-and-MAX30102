@@ -54,6 +54,7 @@ void sendToDashboard(float spo2, float bpm, float temp) {
     HTTPClient http;
     http.begin(server_url);
     http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-Service-Key", "fCpTkSJvTydNIAGnh68NlSUbH3tLZ-jFAL2Jq-e173g");
 
     String jsonPayload = "{";
     jsonPayload += "\"id_user\":" + String(ID_USER) + ",";

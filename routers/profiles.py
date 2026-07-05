@@ -8,7 +8,7 @@ import uuid
 import aiofiles
 from database import get_db
 import models, schemas
-from routers.auth import get_current_user
+from routers.auth import get_current_user, get_current_user_or_service
 from cache import (
     profile_cache, profile_cache_lock,
     invalidate_profile_cache, invalidate_profile_owner,
@@ -86,15 +86,40 @@ async def create_profile(
     return profile_to_response(profile)
 
 
+@router.get("/search", response_model=None)
+def search_user_by_phone(
+    phone: str,
+    current_user = Depends(get_current_user_or_service),
+    db: Session = Depends(get_db)
+):
+    """Cari user berdasarkan nomor telepon — dipakai oleh dashboard dokter untuk assign pasien."""
+    user = db.query(models.User).filter(models.User.phone == phone).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User dengan nomor tersebut tidak ditemukan.")
+
+    profiles = db.query(models.Profile)\
+                 .filter(models.Profile.id_user == user.id)\
+                 .all()
+
+    return {
+        "id_user": user.id,
+        "name": user.name,
+        "phone": user.phone,
+        "profiles": [profile_to_response(p) for p in profiles],
+    }
+
+
 @router.get("/{id_user}", response_model=List[schemas.ProfileOut])
 def get_profiles(
     id_user: int,
-    current_user: models.User = Depends(get_current_user),
+    current_user = Depends(get_current_user_or_service),
     db: Session = Depends(get_db)
 ):
     """Ambil semua profile milik satu user (untuk ditampilkan di profile selector)."""
-    if id_user != current_user.id:
-        raise HTTPException(status_code=403, detail="Tidak diizinkan melihat profile user lain.")
+    # Service call (dashboard dokter) → skip ownership check
+    if not getattr(current_user, 'is_service', False):
+        if id_user != current_user.id:
+            raise HTTPException(status_code=403, detail="Tidak diizinkan melihat profile user lain.")
 
     # Cache lookup — profile jarang berubah, TTL 60 detik
     with profile_cache_lock:

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from database import get_db
 import models, schemas
-from routers.auth import get_current_user
+from routers.auth import get_current_user, get_current_user_or_service
 import os
 import httpx
 import logging
@@ -25,11 +25,19 @@ _ml_client = httpx.AsyncClient(
 )
 
 
-def _check_profile_ownership(db: Session, id_profile: int, user_id: int):
+def _check_profile_ownership(db: Session, id_profile: int, user_id: int, is_service: bool = False):
     """
     Validasi profile ownership dengan caching.
     Cache key: profile_id -> user_id. TTL 120 detik.
+    Service call (is_service=True) → skip ownership check, hanya validasi profile exists.
     """
+    # Service call → hanya cek apakah profile ada
+    if is_service:
+        profile = db.query(models.Profile).filter(models.Profile.id == id_profile).first()
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile tidak ditemukan.")
+        return True
+
     with profile_owner_cache_lock:
         cached_owner = profile_owner_cache.get(id_profile)
 
@@ -109,15 +117,16 @@ def get_measurements(
     id_profile: int,
     skip: int = Query(0, ge=0, description="Jumlah record yang di-skip (offset)"),
     limit: int = Query(50, ge=1, le=200, description="Maks record per halaman"),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_user_or_service),
     db: Session = Depends(get_db)
 ):
     """
     Ambil data pengukuran berdasarkan profile dengan pagination.
     Flutter pakai ini untuk tampilkan riwayat per profile.
     """
-    # Validasi profile ownership (cached)
-    _check_profile_ownership(db, id_profile, current_user.id)
+    is_service = getattr(current_user, 'is_service', False)
+    # Validasi profile ownership (cached) — service call skip ownership
+    _check_profile_ownership(db, id_profile, current_user.id, is_service=is_service)
 
     # Cache lookup — key: (profile_id, skip, limit)
     cache_key = (id_profile, skip, limit)
@@ -126,15 +135,16 @@ def get_measurements(
     if cached is not None:
         return cached
 
-    records = db.query(models.Measurement)\
-                .filter(
-                    models.Measurement.id_profile == id_profile,
-                    models.Measurement.id_user == current_user.id
-                )\
-                .order_by(models.Measurement.datetime.desc())\
-                .offset(skip)\
-                .limit(limit)\
-                .all()
+    # Service call → ambil semua data profile tanpa filter user
+    query = db.query(models.Measurement)\
+              .filter(models.Measurement.id_profile == id_profile)
+    if not is_service:
+        query = query.filter(models.Measurement.id_user == current_user.id)
+
+    records = query.order_by(models.Measurement.datetime.desc())\
+                   .offset(skip)\
+                   .limit(limit)\
+                   .all()
     if not records:
         raise HTTPException(status_code=404, detail="Belum ada data untuk profile ini.")
 
@@ -149,12 +159,13 @@ def get_measurements(
 @router.get("/{id_profile}/latest", response_model=schemas.MeasurementOut)
 def get_latest_measurement(
     id_profile: int,
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_user_or_service),
     db: Session = Depends(get_db)
 ):
     """Ambil pengukuran terbaru saja untuk ditampilkan di dashboard."""
+    is_service = getattr(current_user, 'is_service', False)
     # Validasi profile ownership (cached)
-    _check_profile_ownership(db, id_profile, current_user.id)
+    _check_profile_ownership(db, id_profile, current_user.id, is_service=is_service)
 
     # Cache lookup — TTL 15 detik
     with latest_measurement_cache_lock:
@@ -162,13 +173,12 @@ def get_latest_measurement(
     if cached is not None:
         return cached
 
-    record = db.query(models.Measurement)\
-               .filter(
-                   models.Measurement.id_profile == id_profile,
-                   models.Measurement.id_user == current_user.id
-               )\
-               .order_by(models.Measurement.datetime.desc())\
-               .first()
+    query = db.query(models.Measurement)\
+              .filter(models.Measurement.id_profile == id_profile)
+    if not is_service:
+        query = query.filter(models.Measurement.id_user == current_user.id)
+
+    record = query.order_by(models.Measurement.datetime.desc()).first()
     if not record:
         raise HTTPException(status_code=404, detail="Belum ada data untuk profile ini.")
 
@@ -185,27 +195,37 @@ def get_latest_measurement(
 @router.post("/spo2", response_model=schemas.Spo2MeasurementOut)
 async def save_spo2_measurement(
     data: schemas.Spo2MeasurementIn,
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_user_or_service),
     db: Session = Depends(get_db)
 ):
     """
     Simpan hasil pengukuran dari sensor SpO2 (MAX30102).
     ESP32/Flutter mengirim data SpO2 + temperature + bpm + id_user + id_profile.
     Sebelum disimpan, akan mengambil data Omron terakhir untuk prediksi gula darah.
+
+    Autentikasi:
+      - Mobile app: Bearer JWT token
+      - ESP32:      Header X-Service-Key
     """
-    if data.id_user != current_user.id:
-        raise HTTPException(
-            status_code=403,
-            detail="Tidak diizinkan menyimpan data untuk user lain."
-        )
+    is_service = getattr(current_user, "is_service", False)
+
+    # Untuk user biasa (JWT), pastikan hanya bisa simpan data milik sendiri
+    if not is_service:
+        if data.id_user != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Tidak diizinkan menyimpan data untuk user lain."
+            )
+
+    effective_user_id = data.id_user if is_service else current_user.id
 
     # 1. Validasi profile milik user yang benar (cached)
-    _check_profile_ownership(db, data.id_profile, current_user.id)
+    _check_profile_ownership(db, data.id_profile, effective_user_id, is_service=is_service)
 
     # 2. Ambil data Omron terakhir
     omron_latest = db.query(models.Measurement).filter(
         models.Measurement.id_profile == data.id_profile,
-        models.Measurement.id_user == current_user.id
+        models.Measurement.id_user == effective_user_id
     ).order_by(models.Measurement.datetime.desc()).first()
 
     if not omron_latest:
@@ -238,7 +258,7 @@ async def save_spo2_measurement(
 
     # 4. Simpan ke database (tanpa refresh, expire_on_commit=False)
     record = models.Spo2Measurement(
-        id_user    = current_user.id,
+        id_user    = effective_user_id,
         id_profile = data.id_profile,
         spo2       = data.spo2,
         bpm        = data.bpm,
@@ -256,24 +276,25 @@ def get_spo2_measurements(
     id_profile: int,
     skip: int = Query(0, ge=0, description="Jumlah record yang di-skip (offset)"),
     limit: int = Query(50, ge=1, le=200, description="Maks record per halaman"),
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_user_or_service),
     db: Session = Depends(get_db)
 ):
     """
     Ambil data pengukuran SpO2 berdasarkan profile dengan pagination.
     """
+    is_service = getattr(current_user, 'is_service', False)
     # Validasi profile ownership (cached)
-    _check_profile_ownership(db, id_profile, current_user.id)
+    _check_profile_ownership(db, id_profile, current_user.id, is_service=is_service)
 
-    records = db.query(models.Spo2Measurement)\
-                .filter(
-                    models.Spo2Measurement.id_profile == id_profile,
-                    models.Spo2Measurement.id_user == current_user.id
-                )\
-                .order_by(models.Spo2Measurement.datetime.desc())\
-                .offset(skip)\
-                .limit(limit)\
-                .all()
+    query = db.query(models.Spo2Measurement)\
+              .filter(models.Spo2Measurement.id_profile == id_profile)
+    if not is_service:
+        query = query.filter(models.Spo2Measurement.id_user == current_user.id)
+
+    records = query.order_by(models.Spo2Measurement.datetime.desc())\
+                   .offset(skip)\
+                   .limit(limit)\
+                   .all()
     if not records:
         raise HTTPException(status_code=404, detail="Belum ada data SpO2 untuk profile ini.")
     return records
@@ -282,20 +303,20 @@ def get_spo2_measurements(
 @router.get("/{id_profile}/spo2/latest", response_model=schemas.Spo2MeasurementOut)
 def get_latest_spo2_measurement(
     id_profile: int,
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_user_or_service),
     db: Session = Depends(get_db)
 ):
     """Ambil pengukuran SpO2 terbaru saja untuk ditampilkan di dashboard."""
+    is_service = getattr(current_user, 'is_service', False)
     # Validasi profile ownership (cached)
-    _check_profile_ownership(db, id_profile, current_user.id)
+    _check_profile_ownership(db, id_profile, current_user.id, is_service=is_service)
 
-    record = db.query(models.Spo2Measurement)\
-               .filter(
-                   models.Spo2Measurement.id_profile == id_profile,
-                   models.Spo2Measurement.id_user == current_user.id
-               )\
-               .order_by(models.Spo2Measurement.datetime.desc())\
-               .first()
+    query = db.query(models.Spo2Measurement)\
+              .filter(models.Spo2Measurement.id_profile == id_profile)
+    if not is_service:
+        query = query.filter(models.Spo2Measurement.id_user == current_user.id)
+
+    record = query.order_by(models.Spo2Measurement.datetime.desc()).first()
     if not record:
         raise HTTPException(status_code=404, detail="Belum ada data SpO2 untuk profile ini.")
     return record
