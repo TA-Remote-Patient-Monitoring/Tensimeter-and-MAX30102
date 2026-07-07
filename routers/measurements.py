@@ -5,8 +5,8 @@ from database import get_db
 import models, schemas
 from routers.auth import get_current_user, get_current_user_or_service
 import os
-import httpx
 import logging
+from ml_model.predictor import predict_glucose, is_available as ml_is_available
 
 from cache import (
     profile_owner_cache, profile_owner_cache_lock,
@@ -17,12 +17,11 @@ from cache import (
 router = APIRouter()
 logger = logging.getLogger("measurements")
 
-# ── Singleton AsyncClient untuk koneksi ke ML API ──────────
-# Connection pooling: reuse koneksi TCP, hindari overhead handshake per request.
-_ml_client = httpx.AsyncClient(
-    timeout=httpx.Timeout(5.0, connect=2.0),
-    limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
-)
+# ML model ter-load langsung di memory (tanpa perlu server terpisah)
+if ml_is_available():
+    logger.info("ML Predictor tersedia — prediksi gula darah aktif.")
+else:
+    logger.warning("ML Predictor tidak tersedia — prediksi gula darah nonaktif.")
 
 
 def _check_profile_ownership(db: Session, id_profile: int, user_id: int, is_service: bool = False):
@@ -234,27 +233,41 @@ async def save_spo2_measurement(
             detail="Harus mengukur tekanan darah (Omron) terlebih dahulu sebelum mengukur SpO2 untuk prediksi gula darah."
         )
 
-    # 3. Prediksi Gula Darah ke ML API (async, non-blocking)
-    ml_api_url = os.getenv("ML_API_URL", "http://127.0.0.1:8001/predict")
+    # 3. Ambil data profil untuk prediksi ML (gender, age, tinggi, berat)
+    profile = db.query(models.Profile).filter(
+        models.Profile.id == data.id_profile
+    ).first()
+
+    # 4. Prediksi Gula Darah secara langsung (in-process, tanpa HTTP)
     predicted_glucose = None
 
-    try:
-        payload = {
-            "bpm": data.bpm,
-            "spo2": data.spo2,
-            "sys": omron_latest.sys,
-            "dia": omron_latest.dia
-        }
-        # Async HTTP call — tidak memblokir event loop
-        response = await _ml_client.post(ml_api_url, json=payload)
+    if ml_is_available() and profile:
+        try:
+            # SpO2 digunakan sebagai proxy ratio_r (R-value)
+            # Rumus pendekatan: ratio_r ≈ (110 - spo2) / 25
+            ratio_r = round((110.0 - data.spo2) / 25.0, 4) if data.spo2 > 0 else 0.5
 
-        if response.status_code == 200:
-            ml_data = response.json()
-            predicted_glucose = ml_data.get("prediction", {}).get("glucose_mg_dl")
-        else:
-            logger.warning("ML API Error: %s", response.text)
-    except Exception as e:
-        logger.warning("Gagal menghubungi ML API: %s", e)
+            result = predict_glucose(
+                gender    = profile.gender or "M",
+                age       = profile.age or 30,
+                height_cm = profile.tb or 170.0,
+                weight_kg = profile.bb or 70.0,
+                sbp       = float(omron_latest.sys),
+                dbp       = float(omron_latest.dia),
+                bpm       = float(data.bpm),
+                ratio_r   = ratio_r,
+            )
+
+            if result:
+                predicted_glucose = result["predicted_glucose_mg_dl"]
+                logger.info(
+                    "Prediksi gula darah: %.2f mg/dL (%s)",
+                    predicted_glucose, result["glucose_category"]
+                )
+        except Exception as e:
+            logger.warning("Gagal prediksi gula darah: %s", e)
+    elif not ml_is_available():
+        logger.warning("ML model tidak tersedia, skip prediksi gula darah.")
 
     # 4. Simpan ke database (tanpa refresh, expire_on_commit=False)
     record = models.Spo2Measurement(

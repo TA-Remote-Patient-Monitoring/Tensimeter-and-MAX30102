@@ -155,8 +155,12 @@ def get_current_user_or_service(
       1. X-Service-Key header → return ServiceUser (untuk dashboard dokter)
       2. Bearer JWT token     → return CachedUser  (untuk mobile app)
     """
-    # Mode 1: Service key dari dashboard
+    # Mode 1: Service key dari dashboard / ESP32
+    print(f"[AUTH DEBUG] X-Service-Key received: '{x_service_key}'")
+    print(f"[AUTH DEBUG] SERVICE_KEY from env: '{SERVICE_KEY}'")
+    print(f"[AUTH DEBUG] Match: {x_service_key == SERVICE_KEY if (x_service_key and SERVICE_KEY) else 'N/A'}")
     if x_service_key and SERVICE_KEY and x_service_key == SERVICE_KEY:
+        print("[AUTH DEBUG] → ServiceUser OK")
         return ServiceUser()
 
     # Mode 2: JWT token biasa (mobile app)

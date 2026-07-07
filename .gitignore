@@ -132,3 +132,6 @@ dmypy.json
 # Frontend sources and build output
 frontend/
 frontend-next/
+
+omron.db-shm
+omron.db-wal
