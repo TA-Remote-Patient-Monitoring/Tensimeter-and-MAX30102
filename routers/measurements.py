@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from database import get_db
 import models, schemas
 from routers.auth import get_current_user, get_current_user_or_service
 import os
 import logging
+import threading
 from ml_model.predictor import predict_glucose, is_available as ml_is_available
 
 from cache import (
@@ -22,6 +23,13 @@ if ml_is_available():
     logger.info("ML Predictor tersedia — prediksi gula darah aktif.")
 else:
     logger.warning("ML Predictor tidak tersedia — prediksi gula darah nonaktif.")
+
+# ─── ACTIVE SESSION (multiuser SpO2) ─────────────────────
+# In-memory store: siapa yang sedang mengukur SpO2.
+# Diset oleh Expo app saat user klik "Mau Prediksi Gula Darah?"
+# Dipakai oleh ESP32 yang kirim data tanpa id_user/id_profile.
+_active_session: Optional[dict] = None  # {"id_user": int, "id_profile": int}
+_active_session_lock = threading.Lock()
 
 
 def _check_profile_ownership(db: Session, id_profile: int, user_id: int, is_service: bool = False):
@@ -189,6 +197,65 @@ def get_latest_measurement(
     return result
 
 
+# ─── ACTIVE SESSION ENDPOINTS ─────────────────────────────
+
+@router.post("/spo2/active-session", response_model=schemas.ActiveSessionOut)
+def set_active_session(
+    data: schemas.ActiveSessionIn,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Expo app memanggil ini saat user klik "Mau Prediksi Gula Darah?".
+    Menyimpan id_user + id_profile yang sedang aktif mengukur SpO2.
+    ESP32 yang kirim data tanpa id_user/id_profile akan otomatis
+    di-assign ke session ini.
+    """
+    global _active_session
+
+    # Validasi: user hanya bisa set session untuk dirinya sendiri
+    if data.id_user != current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Tidak diizinkan mengatur session untuk user lain."
+        )
+
+    # Validasi profile ownership
+    _check_profile_ownership(db, data.id_profile, current_user.id)
+
+    with _active_session_lock:
+        _active_session = {
+            "id_user": data.id_user,
+            "id_profile": data.id_profile,
+        }
+
+    logger.info("Active session diset: user=%d, profile=%d", data.id_user, data.id_profile)
+    return schemas.ActiveSessionOut(
+        message="Active session berhasil diset.",
+        id_user=data.id_user,
+        id_profile=data.id_profile,
+    )
+
+
+@router.get("/spo2/active-session", response_model=schemas.ActiveSessionOut)
+def get_active_session():
+    """Cek session yang sedang aktif (untuk debugging / ESP32)."""
+    with _active_session_lock:
+        session = _active_session
+
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail="Tidak ada session aktif. User harus klik 'Mau Prediksi Gula Darah?' di app terlebih dahulu."
+        )
+
+    return schemas.ActiveSessionOut(
+        message="Session aktif ditemukan.",
+        id_user=session["id_user"],
+        id_profile=session["id_profile"],
+    )
+
+
 # ─── SPO2 MEASUREMENTS ───────────────────────────────────
 
 @router.post("/spo2", response_model=schemas.Spo2MeasurementOut)
@@ -199,31 +266,61 @@ async def save_spo2_measurement(
 ):
     """
     Simpan hasil pengukuran dari sensor SpO2 (MAX30102).
-    ESP32/Flutter mengirim data SpO2 + temperature + bpm + id_user + id_profile.
-    Sebelum disimpan, akan mengambil data Omron terakhir untuk prediksi gula darah.
 
-    Autentikasi:
-      - Mobile app: Bearer JWT token
-      - ESP32:      Header X-Service-Key
+    Dua mode:
+    1. ESP32 (X-Service-Key): kirim tanpa id_user/id_profile
+       → otomatis ambil dari active session yang di-set oleh Expo app.
+    2. Mobile app (Bearer JWT): kirim dengan id_user/id_profile.
+
+    Sebelum disimpan, akan mengambil data Omron terakhir untuk prediksi gula darah.
     """
+    global _active_session
     is_service = getattr(current_user, "is_service", False)
 
-    # Untuk user biasa (JWT), pastikan hanya bisa simpan data milik sendiri
-    if not is_service:
+    # ── Resolve id_user & id_profile ──────────────────────
+    if is_service and (data.id_user is None or data.id_profile is None):
+        # ESP32 tanpa id_user/id_profile → ambil dari active session
+        with _active_session_lock:
+            session = _active_session
+
+        if not session:
+            raise HTTPException(
+                status_code=400,
+                detail="ESP32 mengirim tanpa id_user/id_profile dan tidak ada active session. "
+                       "User harus klik 'Mau Prediksi Gula Darah?' di app terlebih dahulu."
+            )
+
+        effective_user_id = session["id_user"]
+        effective_profile_id = session["id_profile"]
+        logger.info(
+            "ESP32 data resolved via active session: user=%d, profile=%d",
+            effective_user_id, effective_profile_id
+        )
+    elif not is_service:
+        # Mobile app → user harus kirim id_user/id_profile
+        if data.id_user is None or data.id_profile is None:
+            raise HTTPException(
+                status_code=422,
+                detail="id_user dan id_profile wajib diisi."
+            )
         if data.id_user != current_user.id:
             raise HTTPException(
                 status_code=403,
                 detail="Tidak diizinkan menyimpan data untuk user lain."
             )
+        effective_user_id = current_user.id
+        effective_profile_id = data.id_profile
+    else:
+        # Service call dengan id_user/id_profile eksplisit (backward compat)
+        effective_user_id = data.id_user
+        effective_profile_id = data.id_profile
 
-    effective_user_id = data.id_user if is_service else current_user.id
-
-    # 1. Validasi profile milik user yang benar (cached)
-    _check_profile_ownership(db, data.id_profile, effective_user_id, is_service=is_service)
+    # 1. Validasi profile (cached)
+    _check_profile_ownership(db, effective_profile_id, effective_user_id, is_service=is_service)
 
     # 2. Ambil data Omron terakhir
     omron_latest = db.query(models.Measurement).filter(
-        models.Measurement.id_profile == data.id_profile,
+        models.Measurement.id_profile == effective_profile_id,
         models.Measurement.id_user == effective_user_id
     ).order_by(models.Measurement.datetime.desc()).first()
 
@@ -235,7 +332,7 @@ async def save_spo2_measurement(
 
     # 3. Ambil data profil untuk prediksi ML (gender, age, tinggi, berat)
     profile = db.query(models.Profile).filter(
-        models.Profile.id == data.id_profile
+        models.Profile.id == effective_profile_id
     ).first()
 
     # 4. Prediksi Gula Darah secara langsung (in-process, tanpa HTTP)
@@ -272,7 +369,7 @@ async def save_spo2_measurement(
     # 4. Simpan ke database (tanpa refresh, expire_on_commit=False)
     record = models.Spo2Measurement(
         id_user    = effective_user_id,
-        id_profile = data.id_profile,
+        id_profile = effective_profile_id,
         spo2       = data.spo2,
         bpm        = data.bpm,
         temperature= data.temperature,
@@ -281,6 +378,13 @@ async def save_spo2_measurement(
     )
     db.add(record)
     db.commit()
+
+    # 5. Clear active session setelah data berhasil disimpan
+    #    Mencegah data berikutnya masuk ke session yang salah
+    if is_service:
+        with _active_session_lock:
+            _active_session = None
+        logger.info("Active session di-clear setelah data SpO2 disimpan.")
     return record
 
 

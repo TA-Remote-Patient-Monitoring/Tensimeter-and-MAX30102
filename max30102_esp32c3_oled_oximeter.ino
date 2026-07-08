@@ -12,9 +12,9 @@ const char* ssid = "Gusmus";
 const char* password = "gusmus123";
 const char* server_url = "http://192.168.1.17:8000/api/measurements/spo2";
 
-// ID User dan Profile yang akan dikirim (ganti sesuai database)
-const int ID_USER = 1;
-const int ID_PROFILE = 1;
+// ID User dan Profile TIDAK perlu di-hardcode lagi.
+// Backend akan otomatis resolve dari "active session"
+// yang di-set oleh Expo app saat user klik "Mau Prediksi Gula Darah?"
 // ================================================
 
 // Interrupt pin
@@ -56,9 +56,8 @@ void sendToDashboard(float spo2, float bpm, float temp) {
     http.addHeader("Content-Type", "application/json");
     http.addHeader("X-Service-Key", "fCpTkSJvTydNIAGnh68NlSUbH3tLZ-jFAL2Jq-e173g");
 
+    // Tanpa id_user & id_profile — backend resolve dari active session
     String jsonPayload = "{";
-    jsonPayload += "\"id_user\":" + String(ID_USER) + ",";
-    jsonPayload += "\"id_profile\":" + String(ID_PROFILE) + ",";
     jsonPayload += "\"spo2\":" + String(spo2, 1) + ",";
     jsonPayload += "\"bpm\":" + String(bpm, 1) + ",";
     jsonPayload += "\"temperature\":" + String(temp, 2);

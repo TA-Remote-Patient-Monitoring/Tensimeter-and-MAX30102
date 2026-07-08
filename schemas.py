@@ -76,8 +76,8 @@ from pydantic import BaseModel, Field
 # ─── SPO2 MEASUREMENT ────────────────────────────────────
 
 class Spo2MeasurementIn(BaseModel):
-    id_user    : int
-    id_profile : int
+    id_user    : Optional[int] = None   # Opsional — jika kosong, ambil dari active session
+    id_profile : Optional[int] = None   # Opsional — jika kosong, ambil dari active session
     spo2       : float
     bpm        : float
     temperature: float
@@ -95,3 +95,14 @@ class Spo2MeasurementOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+# ─── ACTIVE SESSION (untuk multiuser SpO2) ───────────────
+
+class ActiveSessionIn(BaseModel):
+    id_user    : int
+    id_profile : int
+
+class ActiveSessionOut(BaseModel):
+    message    : str
+    id_user    : int
+    id_profile : int
