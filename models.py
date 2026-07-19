@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, F
 from sqlalchemy.orm import relationship
 from database import Base
 import datetime
+import uuid
 
 
 class User(Base):
@@ -22,17 +23,25 @@ class Profile(Base):
     __tablename__ = "profiles"
 
     id      = Column(Integer, primary_key=True, index=True)
+    uuid    = Column(String, default=lambda: str(uuid.uuid4()), unique=True, index=True)
     id_user = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    name    = Column(String, nullable=False)  # "Ayah", "Ibu", dll
+    name    = Column(String, nullable=False)  # "Ayah", "Ibu", dll (Used by RN)
+    first_name = Column(String, nullable=True) # Used by Next.js
+    last_name = Column(String, nullable=True)  # Used by Next.js
+    phone_number = Column(String, nullable=True)
+    date_of_birth = Column(String, nullable=True)
+    address = Column(String, nullable=True)
     age     = Column(Integer, nullable=False)
     gender  = Column(String, nullable=False)
     tb      = Column(Float, nullable=False)
     bb      = Column(Float, nullable=False)
     image_path = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     user         = relationship("User", back_populates="profiles")
     measurements = relationship("Measurement", back_populates="profile")
     spo2_measurements = relationship("Spo2Measurement", back_populates="profile")
+    notes        = relationship("Note", back_populates="profile", cascade="all, delete-orphan")
 
 
 class Measurement(Base):
@@ -50,6 +59,8 @@ class Measurement(Base):
     bpm        = Column(Integer, nullable=False)
     ihb        = Column(Boolean, default=False)
     mov        = Column(Boolean, default=False)
+    status     = Column(String, nullable=True) # Normal, Normal Tinggi, Hipertensi Tinggi
+    device     = Column(String, default="Omron")
     datetime   = Column(DateTime, default=datetime.datetime.utcnow, index=True)
 
     user    = relationship("User", back_populates="measurements")
@@ -74,3 +85,18 @@ class Spo2Measurement(Base):
 
     user    = relationship("User", back_populates="spo2_measurements")
     profile = relationship("Profile", back_populates="spo2_measurements")
+
+
+class Note(Base):
+    __tablename__ = "notes"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    id_profile = Column(Integer, ForeignKey("profiles.id"), nullable=False)
+    title      = Column(String, nullable=False)
+    content    = Column(String, nullable=False)
+    category   = Column(String, default="Konsultasi")
+    tags       = Column(String, nullable=True) # Stored as JSON string
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+    profile = relationship("Profile", back_populates="notes")

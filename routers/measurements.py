@@ -15,6 +15,28 @@ from cache import (
     measurements_cache, measurements_cache_lock,
 )
 
+import pusher
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+pusher_client = pusher.Pusher(
+  app_id=os.getenv("PUSHER_APP_ID", "local"),
+  key=os.getenv("PUSHER_KEY", "local"),
+  secret=os.getenv("PUSHER_SECRET", "local"),
+  cluster=os.getenv("PUSHER_CLUSTER", "mt1"),
+  ssl=True
+)
+
+def get_bp_status(sys: int, dia: int) -> str:
+    if sys < 120 and dia < 80:
+        return 'Normal'
+    elif (120 <= sys < 140) or (80 <= dia < 90):
+        return 'Normal Tinggi'
+    else:
+        return 'Hipertensi Tinggi'
+
+
 router = APIRouter()
 logger = logging.getLogger("measurements")
 
@@ -108,14 +130,24 @@ def save_measurement(
         bpm        = data.bpm,
         ihb        = bool(data.ihb),
         mov        = bool(data.mov),
+        status     = get_bp_status(data.sys, data.dia),
         datetime   = data.datetime,
     )
     db.add(record)
     db.commit()
-    # TIDAK pakai db.refresh(record) — dengan expire_on_commit=False,
-    # atribut tetap accessible tanpa re-query. Menghemat 1 round-trip DB per write.
+    db.refresh(record)
+    
+    # Broadcast event via Pusher
+    try:
+        pusher_client.trigger(
+            f'patient.{data.id_profile}', 
+            '.BloodPressureDataEvent', 
+            {'id': record.id, 'sys': record.sys, 'dia': record.dia, 'bpm': record.bpm, 'status': record.status}
+        )
+    except Exception as e:
+        logger.warning(f"Failed to trigger pusher event: {e}")
+
     # TIDAK invalidate cache — biarkan TTL yang handle (10-15 detik).
-    # Karena 200 VU share 1 profile, invalidate setiap save membuat cache useless.
     return record
 
 

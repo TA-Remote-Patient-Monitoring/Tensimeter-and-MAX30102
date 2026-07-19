@@ -12,11 +12,24 @@ import os
 import datetime
 import sqlite3
 import asyncio
+import os
+from dotenv import load_dotenv
+load_dotenv()
+import pusher
+
+pusher_client = pusher.Pusher(
+  app_id=os.getenv("PUSHER_APP_ID", "local"),
+  key=os.getenv("PUSHER_KEY", "local"),
+  secret=os.getenv("PUSHER_SECRET", "local"),
+  cluster=os.getenv("PUSHER_CLUSTER", "mt1"),
+  ssl=True
+)
+
 
 # ── TAMBAHAN BARU ──────────────────────────────────────────
 from database import engine, Base
 import models
-from routers import auth, profiles, measurements
+from routers import auth, profiles, measurements, dashboard, notes, doctor
 
 Base.metadata.create_all(bind=engine)  # buat tabel otomatis saat start
 
@@ -47,6 +60,27 @@ def ensure_sqlite_columns() -> None:
             cursor.execute("ALTER TABLE profiles ADD COLUMN bb FLOAT")
         if "image_path" not in profile_columns:
             cursor.execute("ALTER TABLE profiles ADD COLUMN image_path TEXT")
+        if "uuid" not in profile_columns:
+            cursor.execute("ALTER TABLE profiles ADD COLUMN uuid TEXT")
+        if "first_name" not in profile_columns:
+            cursor.execute("ALTER TABLE profiles ADD COLUMN first_name TEXT")
+        if "last_name" not in profile_columns:
+            cursor.execute("ALTER TABLE profiles ADD COLUMN last_name TEXT")
+        if "phone_number" not in profile_columns:
+            cursor.execute("ALTER TABLE profiles ADD COLUMN phone_number TEXT")
+        if "date_of_birth" not in profile_columns:
+            cursor.execute("ALTER TABLE profiles ADD COLUMN date_of_birth TEXT")
+        if "address" not in profile_columns:
+            cursor.execute("ALTER TABLE profiles ADD COLUMN address TEXT")
+        if "created_at" not in profile_columns:
+            cursor.execute("ALTER TABLE profiles ADD COLUMN created_at DATETIME")
+
+        cursor.execute("PRAGMA table_info(measurements)")
+        measurement_columns = {row[1] for row in cursor.fetchall()}
+        if "status" not in measurement_columns:
+            cursor.execute("ALTER TABLE measurements ADD COLUMN status TEXT")
+        if "device" not in measurement_columns:
+            cursor.execute("ALTER TABLE measurements ADD COLUMN device TEXT")
 
         conn.commit()
     finally:
@@ -86,7 +120,8 @@ app.add_middleware(
         "http://localhost:8081",
         "http://127.0.0.1:3000",
         "http://192.168.1.16:3000",
-        "http://10.20.31.178:8000"
+        "http://10.20.31.178:8000",
+        "http://localhost:3001"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -97,6 +132,17 @@ app.add_middleware(
 app.include_router(auth.router,         prefix="/api/auth",         tags=["Auth"])
 app.include_router(profiles.router,     prefix="/api/profiles",     tags=["Profiles"])
 app.include_router(measurements.router, prefix="/api/measurements", tags=["Measurements"])
+app.include_router(dashboard.router,    prefix="/api",              tags=["Dashboard"])
+app.include_router(notes.router,        prefix="/api",              tags=["Notes"])
+app.include_router(doctor.router,       prefix="/api",              tags=["Doctor"])
+
+from fastapi import Form
+@app.post("/api/broadcasting/auth")
+@app.post("/broadcasting/auth")
+def pusher_auth(socket_id: str = Form(...), channel_name: str = Form(...)):
+    # Simply authorize everything for now (Laravel equivalent of Public/Private channel bypass)
+    auth = pusher_client.authenticate(channel=channel_name, socket_id=socket_id)
+    return auth
 # ───────────────────────────────────────────────────────────
 
 
