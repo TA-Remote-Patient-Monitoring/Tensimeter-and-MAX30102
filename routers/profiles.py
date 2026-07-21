@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi import File, Form, UploadFile
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional, Union
 from pathlib import Path
 import os
 import uuid
@@ -21,30 +21,28 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def profile_to_response(profile: models.Profile) -> dict:
-    image_url = None
-    if profile.image_path:
-        image_url = f"/uploads/{Path(profile.image_path).name}"
     return {
         "id": profile.id,
         "id_user": profile.id_user,
         "name": profile.name,
         "age": profile.age,
+        "date_of_birth": profile.date_of_birth,
         "gender": profile.gender,
         "tb": profile.tb,
         "bb": profile.bb,
-        "image_url": image_url,
+        "image_url": None,
     }
 
 
 @router.post("", response_model=schemas.ProfileOut)
-async def create_profile(
+def create_profile(
     id_user : int = Form(...),
     name    : str = Form(...),
     age     : int = Form(...),
     gender  : str = Form(...),
     tb      : float = Form(...),
     bb      : float = Form(...),
-    image   : UploadFile | None = File(None),
+    date_of_birth : Optional[str] = Form(None),
     current_user: models.User = Depends(get_current_user),
     db      : Session = Depends(get_db)
 ):
@@ -56,29 +54,18 @@ async def create_profile(
     if not user:
         raise HTTPException(status_code=404, detail="User tidak ditemukan.")
 
-    image_path = None
-    if image and image.filename:
-        suffix = Path(image.filename).suffix.lower()
-        filename = f"profile_{uuid.uuid4().hex}{suffix}"
-        file_path = UPLOAD_DIR / filename
-        # Async file write — tidak memblokir event loop
-        content = await image.read()
-        async with aiofiles.open(file_path, "wb") as buffer:
-            await buffer.write(content)
-        image_path = str(file_path)
-
     profile = models.Profile(
         id_user = id_user,
         name    = name,
         age     = age,
+        date_of_birth = date_of_birth,
         gender  = gender,
         tb      = tb,
         bb      = bb,
-        image_path = image_path,
+        image_path = None,
     )
     db.add(profile)
     db.commit()
-    # Tanpa db.refresh() — expire_on_commit=False membuat atribut tetap accessible
 
     # Invalidate profile cache untuk user ini
     invalidate_profile_cache(id_user)
@@ -140,6 +127,48 @@ def get_profiles(
         profile_cache[id_user] = result
 
     return result
+
+
+@router.put("/{id_profile}", response_model=schemas.ProfileOut)
+def update_profile(
+    id_profile: int,
+    name: Optional[str] = Form(None),
+    age: Optional[int] = Form(None),
+    gender: Optional[str] = Form(None),
+    tb: Optional[float] = Form(None),
+    bb: Optional[float] = Form(None),
+    date_of_birth: Optional[str] = Form(None),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Perbarui data profile."""
+    profile = db.query(models.Profile).filter(models.Profile.id == id_profile).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile tidak ditemukan.")
+
+    if profile.id_user != current_user.id:
+        raise HTTPException(status_code=403, detail="Tidak diizinkan mengubah profile user lain.")
+
+    if name is not None:
+        profile.name = name
+    if age is not None:
+        profile.age = age
+    if date_of_birth is not None:
+        profile.date_of_birth = date_of_birth
+    if gender is not None:
+        profile.gender = gender
+    if tb is not None:
+        profile.tb = tb
+    if bb is not None:
+        profile.bb = bb
+
+    db.commit()
+
+    # Invalidate cache
+    invalidate_profile_cache(profile.id_user)
+    invalidate_profile_owner(profile.id)
+
+    return profile_to_response(profile)
 
 
 @router.delete("/{id_profile}")

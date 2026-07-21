@@ -25,12 +25,9 @@ class Profile(Base):
     id      = Column(Integer, primary_key=True, index=True)
     uuid    = Column(String, default=lambda: str(uuid.uuid4()), unique=True, index=True)
     id_user = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    name    = Column(String, nullable=False)  # "Ayah", "Ibu", dll (Used by RN)
-    first_name = Column(String, nullable=True) # Used by Next.js
-    last_name = Column(String, nullable=True)  # Used by Next.js
+    name    = Column(String, nullable=False)
     phone_number = Column(String, nullable=True)
     date_of_birth = Column(String, nullable=True)
-    address = Column(String, nullable=True)
     age     = Column(Integer, nullable=False)
     gender  = Column(String, nullable=False)
     tb      = Column(Float, nullable=False)
@@ -39,8 +36,8 @@ class Profile(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     user         = relationship("User", back_populates="profiles")
-    measurements = relationship("Measurement", back_populates="profile")
-    spo2_measurements = relationship("Spo2Measurement", back_populates="profile")
+    measurements = relationship("Measurement", back_populates="profile", cascade="all, delete-orphan")
+    spo2_measurements = relationship("Spo2Measurement", back_populates="profile", cascade="all, delete-orphan")
     notes        = relationship("Note", back_populates="profile", cascade="all, delete-orphan")
 
 

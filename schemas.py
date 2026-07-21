@@ -26,6 +26,7 @@ class LoginOut(BaseModel):
 class ProfileIn(BaseModel):
     name   : str
     age    : int
+    date_of_birth : Optional[str] = None
     gender : str
     tb     : float
     bb     : float
@@ -35,6 +36,7 @@ class ProfileOut(BaseModel):
     id_user : int
     name    : str
     age     : int
+    date_of_birth : Optional[str] = None
     gender  : str
     tb      : float
     bb      : float

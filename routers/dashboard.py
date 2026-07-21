@@ -23,8 +23,9 @@ def get_all_patients(page: int = 1, db: Session = Depends(get_db)):
         data.append({
             "id": p.id,
             "uuid": p.uuid,
-            "first_name": p.first_name or p.name,
-            "last_name": p.last_name or "",
+            "name": p.name,
+            "first_name": p.name,
+            "last_name": "",
             "phone_number": p.phone_number,
             "created_at": p.created_at.isoformat() if p.created_at else None,
             "healthData": [{
@@ -106,8 +107,9 @@ def recent_patients(db: Session = Depends(get_db)):
         recent_patients.append({
             "id": p.id,
             "uuid": p.uuid,
-            "first_name": p.first_name or p.name,
-            "last_name": p.last_name or "",
+            "name": p.name,
+            "first_name": p.name,
+            "last_name": "",
             "lastBP": f"{m.sys}/{m.dia}",
             "status": m.status,
             "lastVisit": m.datetime.isoformat()
@@ -194,12 +196,12 @@ def get_patient_by_uuid(uuid_or_id: str, page: int = 1, db: Session = Depends(ge
         "patient_data": {
             "id": patient.id,
             "uuid": patient.uuid,
-            "first_name": patient.first_name or patient.name,
-            "last_name": patient.last_name or "",
+            "name": patient.name,
+            "first_name": patient.name,
+            "last_name": "",
             "phone_number": patient.phone_number,
             "date_of_birth": patient.date_of_birth,
             "gender": patient.gender,
-            "address": patient.address,
             "height": patient.tb,
             "weight": patient.bb,
             "created_at": patient.created_at.isoformat() if patient.created_at else None
