@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 import fastapi
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
