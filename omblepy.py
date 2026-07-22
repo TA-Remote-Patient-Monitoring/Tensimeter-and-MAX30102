@@ -343,11 +343,17 @@ async def selectBLEdevices():
 async def scanBLEDevices():
     """Scan perangkat BLE tanpa input interaktif."""
     from bleak import BleakScanner
-    devices = await BleakScanner.discover()
-    return [
-        {"id": idx, "mac": dev.address, "name": dev.name or "Unknown", "rssi": dev.rssi}
-        for idx, dev in enumerate(devices)
-    ]
+    import logging
+    logger = logging.getLogger("omblepy")
+    logger.info("Starting BLE scan (10 seconds)...")
+    devices = await BleakScanner.discover(timeout=10)
+    logger.info(f"BLE scan complete. Found {len(devices)} devices.")
+    result = []
+    for idx, dev in enumerate(devices):
+        name = dev.name or "Unknown"
+        logger.info(f"  Device {idx}: name={name}, mac={dev.address}, rssi={dev.rssi}")
+        result.append({"id": idx, "mac": dev.address, "name": name, "rssi": dev.rssi})
+    return result
 
 async def main():
     # global self.ble_client

@@ -367,6 +367,10 @@ async def save_spo2_measurement(
         models.Profile.id == effective_profile_id
     ).first()
 
+    # 3. Ganti denyut dan datetime dengan nilai dari tensimeter Omron terakhir agar data selalu sinkron
+    effective_bpm = float(omron_latest.bpm)
+    effective_datetime = omron_latest.datetime
+
     # 4. Prediksi Gula Darah secara langsung (in-process, tanpa HTTP)
     predicted_glucose = None
 
@@ -383,7 +387,7 @@ async def save_spo2_measurement(
                 weight_kg = profile.bb or 70.0,
                 sbp       = float(omron_latest.sys),
                 dbp       = float(omron_latest.dia),
-                bpm       = float(data.bpm),
+                bpm       = effective_bpm,
                 ratio_r   = ratio_r,
             )
 
@@ -398,15 +402,15 @@ async def save_spo2_measurement(
     elif not ml_is_available():
         logger.warning("ML model tidak tersedia, skip prediksi gula darah.")
 
-    # 4. Simpan ke database (tanpa refresh, expire_on_commit=False)
+    # 5. Simpan ke database (menggunakan datetime & denyut dari Omron agar sinkron & tidak terpisah baris)
     record = models.Spo2Measurement(
         id_user    = effective_user_id,
         id_profile = effective_profile_id,
         spo2       = data.spo2,
-        bpm        = data.bpm,
+        bpm        = effective_bpm,
         temperature= data.temperature,
         blood_sugar= predicted_glucose,
-        datetime   = data.datetime,
+        datetime   = effective_datetime,
     )
     db.add(record)
     db.commit()
@@ -469,3 +473,44 @@ def get_latest_spo2_measurement(
     if not record:
         raise HTTPException(status_code=404, detail="Belum ada data SpO2 untuk profile ini.")
     return record
+
+
+@router.delete("/{id_measurement}")
+def delete_measurement(
+    id_measurement: int,
+    current_user=Depends(get_current_user_or_service),
+    db: Session = Depends(get_db)
+):
+    """Hapus data pengukuran berdasarkan ID (Omron BP atau SpO2)."""
+    is_service = getattr(current_user, 'is_service', False)
+
+    def is_owner(id_profile: int, id_user: int) -> bool:
+        if is_service:
+            return True
+        if id_user == current_user.id:
+            return True
+        profile = db.query(models.Profile).filter(models.Profile.id == id_profile).first()
+        return profile is not None and profile.id_user == current_user.id
+
+    # 1. Cari di tabel measurements (Omron BP)
+    meas_record = db.query(models.Measurement).filter(models.Measurement.id == id_measurement).first()
+    if meas_record and is_owner(meas_record.id_profile, meas_record.id_user):
+        db.delete(meas_record)
+        db.commit()
+        with measurements_cache_lock:
+            measurements_cache.clear()
+        with latest_measurement_cache_lock:
+            latest_measurement_cache.clear()
+        return {"message": "Pengukuran berhasil dihapus.", "id": id_measurement}
+
+    # 2. Cari di tabel spo2_measurements (MAX30102)
+    spo2_record = db.query(models.Spo2Measurement).filter(models.Spo2Measurement.id == id_measurement).first()
+    if spo2_record and is_owner(spo2_record.id_profile, spo2_record.id_user):
+        db.delete(spo2_record)
+        db.commit()
+        return {"message": "Pengukuran SpO2 berhasil dihapus.", "id": id_measurement}
+
+    if meas_record or spo2_record:
+        raise HTTPException(status_code=403, detail="Tidak diizinkan menghapus data user lain.")
+
+    raise HTTPException(status_code=404, detail="Pengukuran tidak ditemukan.")

@@ -1,5 +1,6 @@
 #include <Arduino.h>
-// #include <U8g2lib.h> // OLED Disabled
+#include <U8g2lib.h>
+#include <Wire.h>
 #include "algorithm_by_RF.h"
 #include "max30102.h"
 #include "algorithm.h" 
@@ -8,9 +9,9 @@
 #include <HTTPClient.h>
 
 // ========== KONFIGURASI WIFI & BACKEND ==========
-const char* ssid = "Gusmus";
-const char* password = "gusmus123";
-const char* server_url = "http://192.168.1.17:8000/api/measurements/spo2";
+const char* ssid = "Twenty Three House 4G";
+const char* password = "HouseOf23";
+const char* server_url = "http://rpms.gilangramadhani.tech/api/measurements/spo2";
 
 // ID User dan Profile TIDAK perlu di-hardcode lagi.
 // Backend akan otomatis resolve dari "active session"
@@ -21,6 +22,8 @@ const char* server_url = "http://192.168.1.17:8000/api/measurements/spo2";
 // const byte oxiInt = 2; // (Tidak digunakan)
 const int SENSOR_I2C_SDA_PIN = 8;
 const int SENSOR_I2C_SCL_PIN = 9;
+const int OLED_SDA_PIN = 4;  // Pin SDA khusus OLED (terpisah dari sensor)
+const int OLED_SCL_PIN = 5;  // Pin SCL khusus OLED (terpisah dari sensor)
 const int HEARTBEAT_LED_PIN = 10; // Dipindah ke 10 agar tidak bentrok dengan SDA(8)
 const uint32_t HEARTBEAT_LED_PULSE_MS = 60;
 const bool HEARTBEAT_LED_ACTIVE_LOW = true;
@@ -48,6 +51,165 @@ bool heartbeat_led_on = false;
 uint32_t stable_start_time = 0;
 bool is_stable = false;
 bool data_sent = false;
+bool wifi_connected = false; // Status WiFi global
+
+// ========== KONFIGURASI & STATES OLED ==========
+enum DisplayState {
+  STATE_CONNECTING_WIFI,
+  STATE_WIFI_CONNECTED,
+  STATE_SENSOR_ERROR,
+  STATE_NO_FINGER,
+  STATE_MEASURING,
+  STATE_SENDING,
+  STATE_SEND_SUCCESS,
+  STATE_SEND_ERROR
+};
+
+// Driver SSD1306 128x64 menggunakan SOFTWARE I2C di pin terpisah (GPIO 4 & 5)
+// Agar tidak bentrok fisik dengan MAX30102 yang sudah di GPIO 8 & 9
+U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, /* SCL=*/ OLED_SCL_PIN, /* SDA=*/ OLED_SDA_PIN, /* reset=*/ U8X8_PIN_NONE);
+
+int last_http_code = 0;
+
+void drawHeader(const char* title) {
+  u8g2.setFont(u8g2_font_8x13_tf);
+  int w = u8g2.getStrWidth(title);
+  u8g2.drawStr((128 - w) / 2, 12, title);
+  u8g2.drawHLine(0, 15, 128);
+}
+
+void updateOledScreen(DisplayState state, int bpm = -1, int spo2 = -1, const String& extraInfo = "") {
+  u8g2.clearBuffer();
+  
+  switch(state) {
+    case STATE_CONNECTING_WIFI:
+      drawHeader("WIFI KONEKSI");
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(0, 30, "Menghubungkan ke:");
+      u8g2.drawStr(0, 43, ssid);
+      u8g2.drawStr(0, 58, "Harap tunggu...");
+      break;
+
+    case STATE_WIFI_CONNECTED:
+      drawHeader("WIFI TERHUBUNG");
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(0, 30, "Terhubung!");
+      u8g2.drawStr(0, 43, ("IP: " + WiFi.localIP().toString()).c_str());
+      u8g2.drawStr(0, 58, "Memulai sensor...");
+      break;
+
+    case STATE_SENSOR_ERROR:
+      drawHeader("SENSOR ERROR");
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(0, 32, "Sensor MAX30102");
+      u8g2.drawStr(0, 45, "tidak terdeteksi!");
+      u8g2.drawStr(0, 58, "Cek kabel & pin");
+      break;
+
+    case STATE_NO_FINGER:
+      drawHeader("READY STATE");
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(15, 34, "Tempelkan Jari");
+      u8g2.drawStr(15, 48, "Untuk Mengukur");
+      u8g2.drawStr(0, 62, "WiFi: Terhubung");
+      break;
+
+    case STATE_MEASURING:
+      drawHeader("MENGAMBIL DATA");
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(5, 30, "BPM :");
+      u8g2.setFont(u8g2_font_10x20_tr);
+      if (bpm >= 30 && bpm <= 220) {
+        u8g2.setCursor(45, 33);
+        u8g2.print(bpm);
+      } else {
+        u8g2.drawStr(45, 33, "--");
+      }
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(5, 52, "SpO2:");
+      u8g2.setFont(u8g2_font_10x20_tr);
+      if (spo2 >= 50 && spo2 <= 100) {
+        u8g2.setCursor(45, 55);
+        u8g2.print(spo2);
+        u8g2.print(" %");
+      } else {
+        u8g2.drawStr(45, 55, "-- %");
+      }
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      if (extraInfo != "") {
+        u8g2.drawStr(5, 62, extraInfo.c_str());
+      } else {
+        u8g2.drawStr(5, 62, "Mencari sinyal...");
+      }
+      break;
+
+    case STATE_SENDING:
+      drawHeader("MENGIRIM DATA");
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(5, 28, "BPM :");
+      u8g2.setFont(u8g2_font_10x20_tr);
+      u8g2.setCursor(45, 31);
+      u8g2.print(bpm);
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(5, 48, "SpO2:");
+      u8g2.setFont(u8g2_font_10x20_tr);
+      u8g2.setCursor(45, 51);
+      u8g2.print(spo2);
+      u8g2.print(" %");
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(5, 62, "Mengirim ke server...");
+      break;
+
+    case STATE_SEND_SUCCESS:
+      drawHeader("DATA TERKIRIM");
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(5, 28, "BPM :");
+      u8g2.setFont(u8g2_font_10x20_tr);
+      u8g2.setCursor(45, 31);
+      u8g2.print(bpm);
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(5, 48, "SpO2:");
+      u8g2.setFont(u8g2_font_10x20_tr);
+      u8g2.setCursor(45, 51);
+      u8g2.print(spo2);
+      u8g2.print(" %");
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(5, 62, "Terkirim ke Server!");
+      break;
+
+    case STATE_SEND_ERROR:
+      drawHeader("GAGAL MENGIRIM");
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(5, 28, "BPM :");
+      u8g2.setFont(u8g2_font_10x20_tr);
+      u8g2.setCursor(45, 31);
+      u8g2.print(bpm);
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(5, 48, "SpO2:");
+      u8g2.setFont(u8g2_font_10x20_tr);
+      u8g2.setCursor(45, 51);
+      u8g2.print(spo2);
+      u8g2.print(" %");
+      
+      u8g2.setFont(u8g2_font_6x10_tf);
+      u8g2.drawStr(5, 62, ("Err: " + extraInfo).c_str());
+      break;
+  }
+  
+  u8g2.sendBuffer();
+}
+// ================================================
 
 void sendToDashboard(float spo2, float bpm, float temp) {
   if (WiFi.status() == WL_CONNECTED) {
@@ -63,18 +225,26 @@ void sendToDashboard(float spo2, float bpm, float temp) {
     jsonPayload += "\"temperature\":" + String(temp, 2);
     jsonPayload += "}";
 
+    // Perbarui layar ke status MENGIRIM
+    updateOledScreen(STATE_SENDING, (int)bpm, (int)spo2);
+
     int httpResponseCode = http.POST(jsonPayload);
+    last_http_code = httpResponseCode;
     if (httpResponseCode > 0) {
       Serial.print("Data dikirim ke Dashboard! HTTP Response: ");
       Serial.println(httpResponseCode);
       Serial.println(http.getString());
+      updateOledScreen(STATE_SEND_SUCCESS, (int)bpm, (int)spo2);
     } else {
       Serial.print("Error saat mengirim POST: ");
       Serial.println(httpResponseCode);
+      updateOledScreen(STATE_SEND_ERROR, (int)bpm, (int)spo2, "HTTP " + String(httpResponseCode));
     }
     http.end();
   } else {
     Serial.println("WiFi terputus, tidak bisa mengirim data.");
+    last_http_code = -99;
+    updateOledScreen(STATE_SEND_ERROR, (int)bpm, (int)spo2, "No WiFi");
   }
 }
 
@@ -142,17 +312,6 @@ static void updateHeartbeatLed(int32_t hr_bpm) {
   }
 }
 
-// OLED logic commented out since you likely don't have this exact display wired.
-/*
-class U8G2_SSD1306_72X40_NONAME_F_HW_I2C : public U8G2 {
-  public: U8G2_SSD1306_72X40_NONAME_F_HW_I2C(const u8g2_cb_t *rotation, uint8_t reset = U8X8_PIN_NONE, uint8_t clock = U8X8_PIN_NONE, uint8_t data = U8X8_PIN_NONE) : U8G2() {
-    u8g2_Setup_ssd1306_i2c_72x40_er_f(&u8g2, rotation, u8x8_byte_arduino_hw_i2c, u8x8_gpio_and_delay_arduino);
-    u8x8_SetPin_HW_I2C(getU8x8(), reset, clock, data);
-  }
-};
-U8G2_SSD1306_72X40_NONAME_F_HW_I2C u8g2(U8G2_R2, U8X8_PIN_NONE, SENSOR_I2C_SCL_PIN, SENSOR_I2C_SDA_PIN);
-*/
-
 void setup() {
   // pinMode(oxiInt, INPUT);
   pinMode(HEARTBEAT_LED_PIN, OUTPUT);
@@ -160,24 +319,49 @@ void setup() {
   Serial.begin(115200);
   delay(1000); 
 
-  // Setup WiFi
+  // Memulai Layar OLED
+  u8g2.begin();
+
+  // Setup WiFi dengan display status pada OLED + TIMEOUT 15 detik
   Serial.println();
   Serial.print("Menghubungkan ke WiFi: ");
   Serial.println(ssid);
   WiFi.begin(ssid, password);
+  
+  uint32_t wifi_start = millis();
+  const uint32_t WIFI_TIMEOUT_MS = 15000; // 15 detik timeout
+  
   while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - wifi_start >= WIFI_TIMEOUT_MS) {
+      Serial.println("\nWiFi GAGAL terhubung (timeout 15 detik)");
+      updateOledScreen(STATE_SEND_ERROR, -1, -1, "WiFi Timeout");
+      delay(2000);
+      wifi_connected = false;
+      break;
+    }
+    int elapsed_sec = (millis() - wifi_start) / 1000;
+    updateOledScreen(STATE_CONNECTING_WIFI);
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nWiFi Terhubung!");
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.localIP());
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    wifi_connected = true;
+    Serial.println("\nWiFi Terhubung!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    updateOledScreen(STATE_WIFI_CONNECTED);
+    delay(1500);
+  }
 
-  delay(2000); // Tunggu Serial ESP32-S3
-
-  maxim_max30102_init(SENSOR_I2C_SDA_PIN, SENSOR_I2C_SCL_PIN);  //initialize the MAX30102
-
-  // u8g2.begin();
+  // Inisialisasi sensor MAX30102 dengan deteksi error
+  if (!maxim_max30102_init(SENSOR_I2C_SDA_PIN, SENSOR_I2C_SCL_PIN)) {
+    Serial.println("Gagal mendeteksi sensor MAX30102!");
+    while(true) {
+      updateOledScreen(STATE_SENSOR_ERROR);
+      delay(1000);
+    }
+  }
 
   Serial.print(F("Time[s]\tSpO2\tHR\tSpO2_MX\tHR_MX\tClock\tRatio\tCorr\tTemp[C]"));
   Serial.println("");
@@ -186,29 +370,35 @@ void setup() {
 }
 
 static void updateDisplay(int32_t hr, int32_t spo2) {
-  // OLED commented out
-  /*
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_10x20_mr);
-  u8g2.setCursor(0, 19);
-  if (hr >= 30 && hr <= 250) {
-    u8g2.printf("HR: %d", (int)hr);
-  } else {
-    u8g2.print("HR: --");
-  }
-  u8g2.setCursor(0, 39);
-  if (spo2 >= 0 && spo2 <= 100) {
-    u8g2.printf("O2: %d%%", (int)spo2);
-  } else {
-    u8g2.print("O2: --");
-  }
-  u8g2.sendBuffer();
-  */
+  // Fungsi ini kini digantikan oleh updateOledScreen() yang lebih lengkap
 }
 
 
 //Continuously taking samples from MAX30102.  Heart rate and SpO2 are calculated every ST seconds
 void loop() {
+  // ========== AUTO-RECONNECT WIFI ==========
+  if (WiFi.status() != WL_CONNECTED) {
+    if (wifi_connected) {
+      // WiFi baru saja putus
+      wifi_connected = false;
+      Serial.println("WiFi terputus! Mencoba reconnect...");
+    }
+    // Coba reconnect setiap loop tanpa blocking
+    static uint32_t last_reconnect_attempt = 0;
+    if (millis() - last_reconnect_attempt > 5000) { // Coba tiap 5 detik
+      last_reconnect_attempt = millis();
+      WiFi.disconnect();
+      WiFi.begin(ssid, password);
+    }
+  } else if (!wifi_connected) {
+    // Baru saja berhasil reconnect
+    wifi_connected = true;
+    Serial.println("WiFi reconnected!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  }
+  // ==========================================
+
   float n_spo2,ratio,correl;  //SPO2 value
   int8_t ch_spo2_valid;  //indicator to show if the SPO2 calculation is valid
   int32_t n_heart_rate; //heart rate value
@@ -229,8 +419,26 @@ void loop() {
     }
   }
 
-  // Algorithm expects full chronological window.
-  if(sample_count < BUFFER_SIZE) return;
+  // Cek keberadaan jari secara real-time berdasarkan nilai IR terbaru
+  uint16_t last_sample_idx = (sample_write_index == 0) ? BUFFER_SIZE - 1 : sample_write_index - 1;
+  bool finger_detected = (aun_ir_buffer[last_sample_idx] > 50000);
+
+  if (!finger_detected) {
+    is_stable = false;
+    data_sent = false;
+    last_http_code = 0;
+    updateOledScreen(STATE_NO_FINGER);
+    sample_count = 0; // Reset agar saat jari ditempelkan lagi, buffer mengisi dari awal
+    return;
+  }
+
+  // Tampilkan progress pengisian buffer di layar OLED jika buffer belum penuh
+  if(sample_count < BUFFER_SIZE) {
+    int progress = (sample_count * 100) / BUFFER_SIZE;
+    updateOledScreen(STATE_MEASURING, -1, -1, "Inisialisasi: " + String(progress) + "%");
+    return;
+  }
+
   buildOrderedWindow();
 
   //calculate heart rate and SpO2 after BUFFER_SIZE samples (ST seconds of samples) using Robert's method
@@ -284,26 +492,42 @@ void loop() {
     Serial.print(temperature);
     Serial.println("");
 
-    updateDisplay(filtered_heart_rate, (int32_t)filtered_spo2);
-
     if (!is_stable) {
       is_stable = true;
       stable_start_time = millis();
       Serial.println("\n>>> JARI TERDETEKSI: Menunggu stabil selama 10 detik...");
+      updateOledScreen(STATE_MEASURING, (int)filtered_heart_rate, (int)filtered_spo2, "Stabilisasi: 10s");
     } else {
-      if (!data_sent && (millis() - stable_start_time >= 10000)) { // 10 detik berlalu
-        Serial.println("\n>>> DATA STABIL: Mengirim ke server...");
-        sendToDashboard(filtered_spo2, (float)filtered_heart_rate, temperature);
-        data_sent = true; // Hanya kirim sekali selama jari masih nempel
+      if (!data_sent) {
+        int elapsed_stable = (millis() - stable_start_time) / 1000;
+        int remaining = 10 - elapsed_stable;
+        if (remaining < 0) remaining = 0;
+        
+        if (elapsed_stable >= 10) { // 10 detik berlalu
+          Serial.println("\n>>> DATA STABIL: Mengirim ke server...");
+          sendToDashboard(filtered_spo2, (float)filtered_heart_rate, temperature);
+          data_sent = true; // Hanya kirim sekali selama jari masih nempel
+        } else {
+          updateOledScreen(STATE_MEASURING, (int)filtered_heart_rate, (int)filtered_spo2, "Stabil dlm: " + String(remaining) + "s");
+        }
+      } else {
+        // Jika data sudah terkirim, tampilkan status keberhasilan/kegagalan kirim secara terus-menerus
+        if (last_http_code > 0) {
+          updateOledScreen(STATE_SEND_SUCCESS, (int)filtered_heart_rate, (int)filtered_spo2);
+        } else {
+          updateOledScreen(STATE_SEND_ERROR, (int)filtered_heart_rate, (int)filtered_spo2, "HTTP " + String(last_http_code));
+        }
       }
     }
   } else {
-    // Jari dilepas atau data berantakan, reset state
+    // Jari terdeteksi tapi data berantakan (belum valid)
     if (is_stable) {
-      Serial.println("\n>>> JARI DILEPAS / TIDAK STABIL: Reset timer.");
+      Serial.println("\n>>> DATA TIDAK STABIL: Reset timer.");
     }
     is_stable = false;
     data_sent = false; 
+    last_http_code = 0;
+    updateOledScreen(STATE_MEASURING, -1, -1, "Mencari sinyal...");
   }
   // ================================================
 
@@ -328,4 +552,3 @@ void millis_to_hours(uint32_t ms, char* hr_str)
   itoa(secs,istr,10);
   strcat(hr_str,istr);
 }
-

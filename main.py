@@ -327,14 +327,23 @@ async def connect_and_read(data: ConnectAndReadInput):
 
 
 @app.get("/scan")
-async def scan_devices():
-    """Memindai perangkat BLE."""
+async def scanBLEDevices():
+    """Scan perangkat BLE tanpa input interaktif."""
+    from bleak import BleakScanner
     try:
-        devices = await scanBLEDevices()
-        return {"devices": devices, "message": "Perangkat BLE berhasil dipindai"}
+        print("[BLE] Starting BLE scan (timeout=10s)...")
+        devices = await BleakScanner.discover(timeout=10)
+        print(f"[BLE] Scan complete. Found {len(devices)} raw devices.")
+        result = []
+        for idx, dev in enumerate(devices):
+            name = dev.name or "Unknown"
+            print(f"[BLE]   Device {idx}: name={name}, mac={dev.address}, rssi={dev.rssi}")
+            result.append({"id": idx, "mac": dev.address, "name": name, "rssi": dev.rssi})
+        return {"devices": result, "message": "Perangkat BLE berhasil dipindai"}
     except HTTPException:
         raise
     except Exception as e:
+        print(f"[SCAN] ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Tolong hidupkan bluetooth: {str(e)}")
 
 
